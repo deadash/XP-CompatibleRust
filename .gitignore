@@ -1,0 +1,5 @@
+/target
+xpstub/*.obj
+xpstub/*.lib
+xpstub/*.exp
+xpstub/*.dll
