@@ -4,8 +4,22 @@ use goblin::pe::import::ImportDirectoryEntry;
 use include_dir::{include_dir, Dir};
 use anyhow::Result;
 use scroll::{Pwrite, Pread};
+use clap::Parser;
 
 static PROJECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/modules");
+
+// 命令支持
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    /// Set Input
+    #[clap(short, long, action)]
+    input: String,
+
+    /// Set Output
+    #[clap(short, long, action)]
+    output: String,
+}
 
 fn get_funcname(name: &str) -> String
 {
@@ -53,6 +67,7 @@ fn foa(pe: &PE, rva: u32) -> usize
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
     // 加载配置文件
     let mut tables: HashMap<String, Vec<String>> = HashMap::new();
     for file in PROJECT_DIR.files() {
@@ -66,7 +81,7 @@ fn main() -> Result<()> {
         tables.insert(name, funcs);
     }
     // 读取目标文件
-    let buffer = fs::read("D:\\Projects\\刷卡项目\\code\\target\\i686-pc-windows-msvc\\release\\netCardCtrlSrv.exe")?;
+    let buffer = fs::read(&cli.input)?;
     let pe = PE::parse(&buffer)?;
     // 重构新的IAT
     let mut new_iat = Vec::new();
@@ -192,7 +207,6 @@ fn main() -> Result<()> {
     let mut p_name = foa(&pe, name_start as u32);
     for iat_sec in &new_iat_desc {
         let dll = iat_sec.0;
-        println!("write name: {}", dll);
         out.gwrite_with::<&str>(dll, &mut p_name, ())?;
         out.gwrite_with::<u8>(0, &mut p_name, LE)?;
         for int in iat_sec.1 {
@@ -261,6 +275,7 @@ fn main() -> Result<()> {
         }
     }
 
+    // 修复地址
     for addr in matches {
         let p: u32 = buffer.pread_with(addr, LE)?;
         let p = p as usize;
@@ -270,7 +285,9 @@ fn main() -> Result<()> {
         }
     }
 
+    // TODO: clean 字符串和 INT多余的表 + IAT.
+
     // 修复相关的函数引用
-    fs::write("D:\\Projects\\xpstub\\makexpstub\\test.exe", out)?;
+    fs::write(&cli.output, out)?;
     Ok(())
 }

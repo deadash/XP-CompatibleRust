@@ -3,3 +3,5 @@ xpstub/*.obj
 xpstub/*.lib
 xpstub/*.exp
 xpstub/*.dll
+Cargo.lock
+.vscode/**
