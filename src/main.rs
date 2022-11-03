@@ -189,10 +189,11 @@ fn main() -> Result<()> {
             // 内存加载以基地址为准, 这里应该加上基地址
             new_offset.insert(int.offset + image_base, func_offset + image_base);
             func_offset += 4usize;
-            new_int.push(name_offset);
             if int.rva == 0 {
-                name_offset += 2;
+                // nothing
+                new_int.push((int.ordinal) as usize | 0x8000_0000);
             } else {
+                new_int.push(name_offset);
                 name_offset += 2 + int.name.len() + 1;
             }
         }
@@ -242,8 +243,7 @@ fn main() -> Result<()> {
         for int in iat_sec.1 {
             // OrdinalNumber
             if int.rva == 0 {
-                // TODO: 暂时不支持
-                out.gwrite_with::<u16>(int.ordinal | 0x8000u16, &mut p_name, LE)?;
+                // write nothing
             // HintNameTableRVA
             } else {
                 out.gwrite_with::<u16>(int.ordinal, &mut p_name, LE)?;
