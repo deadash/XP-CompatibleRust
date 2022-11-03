@@ -317,6 +317,13 @@ fn main() -> Result<()> {
 
     // TODO: clean 字符串和 INT多余的表 + IAT.
 
+    // 修改版本支持到0x0501
+    if pe.header.optional_header.unwrap().windows_fields.major_operating_system_version > 5 {
+        let start = pe.header.dos_header.pe_pointer as usize;
+        out.pwrite_with::<u32>(0x10005, start + 64usize, LE)?;
+        out.pwrite_with::<u32>(0x10005, start + 72usize, LE)?;
+    }
+
     // 修复相关的函数引用
     fs::write(&cli.output, out)?;
     Ok(())
