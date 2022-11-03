@@ -6,6 +6,9 @@ use anyhow::Result;
 use scroll::{Pwrite, Pread};
 use clap::Parser;
 
+#[macro_use]
+extern crate log;
+
 static PROJECT_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/modules");
 
 // 命令支持
@@ -38,6 +41,8 @@ fn get_funcname(name: &str) -> String
 // IAT目录表 -> INT,NAME,FUNCTION 三块区域
 // 通过地址融合，得到区域位置以及大小，然后再行分配
 // FIXME: 目前 dll名称和函数名称混合在一起可能会计算错误.
+// OriginalFirstThunk: INT表，导入名称表
+// FirstThunk: IAT表, 导入地址表
 
 #[derive(Debug, Default)]
 struct IAT<'a>
@@ -68,6 +73,11 @@ fn foa(pe: &PE, rva: u32) -> usize
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // 初始化日志
+    flexi_logger::Logger::try_with_env_or_str("warn")?
+        .log_to_stdout()
+        .write_mode(flexi_logger::WriteMode::Direct)
+        .start()?;
     // 加载配置文件
     let mut tables: HashMap<String, Vec<String>> = HashMap::new();
     for file in PROJECT_DIR.files() {
@@ -78,11 +88,17 @@ fn main() -> Result<()> {
             let func = get_funcname(line);
             funcs.push(func);
         }
+        debug!("Load {} module {} functions.", name, funcs.len());
         tables.insert(name, funcs);
     }
     // 读取目标文件
     let buffer = fs::read(&cli.input)?;
     let pe = PE::parse(&buffer)?;
+    // 判断是否是PE64
+    if pe.is_64 {
+        error!("XP does not support 64-bit programs.");
+        return Ok(());
+    }
     // 重构新的IAT
     let mut new_iat = Vec::new();
     // 保存名称的起始地址
@@ -108,24 +124,33 @@ fn main() -> Result<()> {
         }
         let name = imp.name.to_string();
         let is_ker32 = imp.dll.to_lowercase() == "kernel32.dll";
-        let new_dll = if let Some(exists) = tables.get(&dll) {
+        let changed: bool = if let Some(exists) = tables.get(&dll) {
             // 强制使用kernel32模块, 以免没有空间使用 (如果有多的也可以考虑不转发)
-            if !is_ker32 && exists.contains(&name) {
-                imp.dll
+            // imp.rva == 0 表示为序号, 序号一般都有.
+            if (!is_ker32 && exists.contains(&name)) || imp.rva == 0 {
+                false
             }
             else {
-                XPSTUB
+                true
             }
         } else {
-            imp.dll
+            false
         };
+        let new_dll = if changed { XPSTUB } else { imp.dll };
+        if changed {
+            debug!("Forward {} module {} function to stub.", imp.dll, imp.name);
+        }
         new_iat.push(Rc::new(IAT { name, dll: new_dll, ordinal: imp.ordinal, offset: imp.offset, rva: imp.rva, .. Default::default() }))
     }
+    debug!("Name Got(rva) {:x} - {:x}", name_start, name_end);
+    debug!("Function Got(rva) {:x} - {:x}", func_start, func_end);
     // 按新的顺序生成新的IAT表
     let mut out = buffer.to_vec();
     // 获取导入目录
     let imp_dir = pe.header.optional_header.unwrap().data_directories.get_import_table().unwrap();
+    // IAT 表 开始处
     let mut start = foa(&pe, imp_dir.virtual_address);
+    debug!("Got import directory addr(va): {:x}", start);
     // 按照dll模块进行划分
     let mut new_iat_desc: HashMap<String, Vec<Rc<IAT>>> = HashMap::new();
     for iat in &new_iat {
@@ -137,6 +162,7 @@ fn main() -> Result<()> {
             new_iat_desc.insert(dll.to_string(), vec![niat]);
         }
     }
+    trace!("New IAT desc. {:#?}", new_iat_desc);
     // 按导入目录排列所有的函数
     let mut name_offset = name_start;
     let mut func_offset = func_start;
@@ -145,17 +171,19 @@ fn main() -> Result<()> {
     // 新的 name
     let mut new_name = HashMap::new();
     // 新的 firstthunk
-    let mut new_thunk = HashMap::new();
-    // 新的INT 偏移
     let mut new_int = Vec::new();
+    let mut new_thunk = HashMap::new();
+    // 新的IAT 偏移
     let mut new_origin = HashMap::new();
     // INT 表是文件偏移地址
     let image_base = pe.image_base;
     for iat_sec in &new_iat_desc {
         let dll = iat_sec.0;
         new_name.insert(dll.to_owned(), name_offset);
-        new_thunk.insert(dll.to_owned(), func_offset);
-        new_origin.insert(dll.to_owned(), new_int.len() * 4);
+        // INT 表, 导入名称
+        new_thunk.insert(dll.to_owned(), new_int.len() * 4);
+        // IAT 表, 导入地址
+        new_origin.insert(dll.to_owned(), func_offset);
         name_offset += dll.len() + 1;
         for int in iat_sec.1 {
             // 内存加载以基地址为准, 这里应该加上基地址
@@ -173,7 +201,7 @@ fn main() -> Result<()> {
         func_offset += 4usize;
     }
     if func_offset > func_end + 4 {
-        println!("+ Not enough function addresses to write. {:x} - {:x}, {:x}", func_start, func_end, func_offset);
+        error!("+ Not enough function addresses to write. {:x} - {:x}, {:x}", func_start, func_end, func_offset);
     }
     // 获取INT 基地址
     let mut int_base = 0usize;
@@ -184,19 +212,21 @@ fn main() -> Result<()> {
         }
         // TODO: 默认都是0, 旧版本为-1
         if int.time_date_stamp != 0 || int.forwarder_chain != 0 {
-            println!("+ Unsupported INT model in {}, {:x?}", ints.name, int);
+            error!("+ Unsupported INT model in {}, {:x?}", ints.name, int);
         }
     }
+    debug!("INT baseaddr: {:x}", int_base);
     // 写入到 out
     const LE: scroll::Endian = scroll::LE;
     // 先写入IAT目录
     for iat in &new_iat_desc {
         let name = iat.0;
-        let import_lookup_table_rva = (new_origin[name] + int_base) as u32;
+        let import_lookup_table_rva = (new_thunk[name] + int_base) as u32;
         let name_rva = new_name[name] as u32;
-        let import_address_table_rva = new_thunk[name] as u32;
+        let import_address_table_rva = new_origin[name] as u32;
         out.gwrite_with(ImportDirectoryEntry { import_lookup_table_rva, time_date_stamp: 0, forwarder_chain: 0, name_rva, import_address_table_rva }, &mut start, LE)?;
     }
+    // 写入0 结尾
     out.gwrite_with(ImportDirectoryEntry { import_lookup_table_rva: 0, time_date_stamp: 0, forwarder_chain: 0, name_rva: 0, import_address_table_rva: 0 }, &mut start, LE)?;
     // 再写入INT 表
     let mut p_int = foa(&pe, int_base as u32);

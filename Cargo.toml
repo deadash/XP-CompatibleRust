@@ -9,3 +9,5 @@ include_dir = "0.7.2"
 goblin = "0.5"
 scroll = "0.11"
 clap = { version = "4.0.4", features = ["derive"] }
+flexi_logger = "0.23"
+log = "0.4"
