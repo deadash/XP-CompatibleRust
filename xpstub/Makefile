@@ -14,13 +14,20 @@ SYSTEM_LIBS =  kernel32.lib \
 	odbccp32.lib
 LIBS = fileextd.lib ntdll.lib $(SYSTEM_LIBS)
 
-all: xpstub.dll
+all: xpstub.dll	\
+	bcrypt.dll
 
-xpstub.dll: xpstub.obj
+xpstub.dll: xpstub.obj 
 	@link /nologo $(LIBS) /def:xpstub.def /out:xpstub.dll $(LDFLAGS) /DLL xpstub.obj
 
 xpstub.obj: xpstub.c
 	@cl /nologo $(CFLAGS) /c xpstub.c /Foxpstub.obj
+
+bcrypt.dll: bcrypt.obj
+	@link /nologo $(LIBS) /def:bcrypt.def /out:bcrypt.dll $(LDFLAGS) /DLL bcrypt.obj
+
+bcrypt.obj: bcrypt.c
+	@cl /nologo $(CFLAGS) /c bcrypt.c /Fobcrypt.obj
 
 clean:
 	@if exist *.obj del *.obj
