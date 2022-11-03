@@ -7,6 +7,8 @@ EXPORTS
     AcquireSRWLockShared = AcquireSRWLockSharedXP
     SetThreadStackGuarantee = SetThreadStackGuaranteeXP
     AcquireSRWLockExclusive = AcquireSRWLockExclusiveXP
+    InitOnceBeginInitialize = InitOnceBeginInitializeXP
+    InitOnceComplete = InitOnceCompleteXP
 
     ; forward to kernel32.
     ActivateActCtx = KERNEL32.ActivateActCtx

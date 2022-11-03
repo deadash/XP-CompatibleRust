@@ -1,5 +1,13 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <intrin.h>
+
+typedef PRTL_RUN_ONCE LPINIT_ONCE;
+#define STATUS_SUCCESS 0x00000000
+#define STATUS_UNSUCCESSFUL 0xC0000001
+#define STATUS_INVALID_PARAMETER_2 0xC00000F0
+#define STATUS_INVALID_PARAMETER_3 0xC00000F1
+#define STATUS_INVALID_OWNER 0xC000005A
+#define STATUS_OBJECT_NAME_COLLISION 0xC0000035
 
 // TODO:
 // from: https://github.com/Chuyu-Team/YY-Thunks/blob/master/ThunksList.md
@@ -40,6 +48,7 @@ typedef NTSTATUS (WINAPI* NTWAITFORKEYEDEVENT)(
 NTOPENKEYEDEVENT NtOpenKeyedEvent;
 NTRELEASEKEYEDEVENT NtReleaseKeyedEvent;
 NTWAITFORKEYEDEVENT NtWaitForKeyedEvent;
+ULONG (NTAPI*RtlNtStatusToDosError)(IN NTSTATUS status);
 
 #define STATUS_RESOURCE_NOT_OWNED 0xC0000264
 
@@ -663,6 +672,26 @@ IsXp()
     return NtTeb()->ProcessEnvironmentBlock->OSMajorVersion < 6;
 }
 
+DWORD __fastcall NtStatusToDosError(
+    _In_ NTSTATUS Status
+)
+{
+    if (STATUS_TIMEOUT == Status)
+    {
+        return ERROR_TIMEOUT;
+    }
+    return RtlNtStatusToDosError(Status);
+}
+
+DWORD __fastcall BaseSetLastNTError(
+    NTSTATUS Status
+)
+{
+    auto lStatus = NtStatusToDosError(Status);
+    SetLastError(lStatus);
+    return lStatus;
+}
+
 HANDLE __fastcall GetGlobalKeyedEventHandle()
 {
     if (IsXp() && _GlobalKeyedEventHandle == NULL)
@@ -772,6 +801,162 @@ void __fastcall RtlpOptimizeSRWLockList(SRWLOCK* SRWLock, size_t Status)
             RtlpWakeSRWLock(SRWLock, Status);
             break;
         }
+    }
+}
+
+size_t __fastcall RtlpRunOnceWaitForInit(
+    size_t Current,
+    LPINIT_ONCE lpInitOnce
+)
+{
+    HANDLE GlobalKeyedEventHandle = GetGlobalKeyedEventHandle();
+    do
+    {
+        const auto Old = Current;
+        Current = Current & ~(size_t)(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC);
+        const auto New = ((size_t)(&Current) & ~ (size_t)(RTL_RUN_ONCE_ASYNC)) | RTL_RUN_ONCE_CHECK_ONLY;
+        const auto Last = InterlockedCompareExchange((volatile size_t*)lpInitOnce, New, Old);
+        if (Last == Old)
+        {
+            NtWaitForKeyedEvent(GlobalKeyedEventHandle, &Current, 0, NULL);
+            Current = *(volatile size_t*)lpInitOnce;
+        }
+        else
+        {
+            Current = Last;
+        }
+    } while ((Current & (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC)) == RTL_RUN_ONCE_CHECK_ONLY);
+    return Current;
+}
+
+NTSTATUS __fastcall RtlRunOnceBeginInitialize(
+    LPINIT_ONCE lpInitOnce,
+    DWORD dwFlags,
+    LPVOID* lpContext
+)
+{
+    if ((dwFlags & ~(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC))|| ((dwFlags- 1) & dwFlags))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    size_t Current = *(volatile size_t *)lpInitOnce;
+
+    if ((Current & (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC)) == RTL_RUN_ONCE_ASYNC)
+    {
+        InterlockedExchange((volatile size_t *)&lpInitOnce, dwFlags);
+        if (lpContext)
+            *lpContext = (LPVOID)(Current & ~(size_t)(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC));
+
+        return STATUS_SUCCESS;
+    }
+
+    if (dwFlags & RTL_RUN_ONCE_CHECK_ONLY)
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    const size_t New = (dwFlags & RTL_RUN_ONCE_ASYNC) | RTL_RUN_ONCE_CHECK_ONLY;
+    for (;;)
+    {
+        const size_t InitOnceData = Current & 3;
+        if (InitOnceData == 0)
+        {
+            const size_t Last = InterlockedCompareExchange((volatile size_t *)lpInitOnce, New, Current);
+            if (Last == Current)
+                return STATUS_PENDING;
+
+            Current = Last;
+        }
+        else if (InitOnceData == RTL_RUN_ONCE_CHECK_ONLY)
+        {
+            if (dwFlags & RTL_RUN_ONCE_ASYNC)
+                return STATUS_INVALID_PARAMETER_2;
+
+            Current = RtlpRunOnceWaitForInit(Current, lpInitOnce);
+        }
+        else
+        {
+            //疑惑？为什么微软要这样判断……
+            if (Current != (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC))
+            {
+                if (lpContext)
+                    *lpContext = (LPVOID)(Current & ~(size_t)(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC));
+
+                return STATUS_SUCCESS;
+            }
+
+            return (dwFlags & RTL_RUN_ONCE_ASYNC) ? STATUS_PENDING : STATUS_INVALID_PARAMETER_2;
+        }
+    }
+}
+
+void __fastcall RtlpRunOnceWakeAll(size_t *pWake)
+{
+    HANDLE GlobalKeyedEventHandle = GetGlobalKeyedEventHandle();
+    for (LPVOID WakeAddress = (LPVOID)(*pWake & ~(size_t)(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC)); WakeAddress; )
+    {
+        LPVOID NextWakeAddress = *(LPVOID*)WakeAddress;
+        NtReleaseKeyedEvent(GlobalKeyedEventHandle, WakeAddress, 0, NULL);
+        WakeAddress = NextWakeAddress;
+    }
+}
+
+LSTATUS __fastcall RtlRunOnceComplete(
+    _Inout_ LPINIT_ONCE lpInitOnce,
+    _In_ DWORD dwFlags,
+    _In_opt_ LPVOID lpContext
+)
+{
+    if ((dwFlags & ~(RTL_RUN_ONCE_ASYNC | RTL_RUN_ONCE_INIT_FAILED)) || ((dwFlags - 1) & dwFlags))
+    {
+        return STATUS_INVALID_PARAMETER_2;
+    }
+
+    const auto dwNewFlags = (dwFlags ^ ~(dwFlags >> 1)) & 3 ^ dwFlags;
+
+    if (lpContext && ((dwNewFlags & RTL_RUN_ONCE_ASYNC) == 0 || ((size_t)(lpContext) & (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC))))
+    {
+        return STATUS_INVALID_PARAMETER_3;
+    }
+
+    auto Current = *(volatile size_t*)lpInitOnce;
+    auto New = ((size_t)(lpContext) & ~(size_t)(RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC)) | (dwNewFlags & RTL_RUN_ONCE_ASYNC);
+
+    switch (Current & (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC))
+    {
+    case RTL_RUN_ONCE_CHECK_ONLY:
+        if ((dwNewFlags & RTL_RUN_ONCE_CHECK_ONLY) == 0)
+        {
+            return STATUS_INVALID_PARAMETER_2;
+        }
+
+        Current = InterlockedExchange((volatile size_t*)lpInitOnce, New);
+        if ((Current & (RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC)) == RTL_RUN_ONCE_CHECK_ONLY)
+        {
+            RtlpRunOnceWakeAll(&Current);
+            return STATUS_SUCCESS;
+        }
+
+        return STATUS_INVALID_OWNER;
+        break;
+    case RTL_RUN_ONCE_CHECK_ONLY | RTL_RUN_ONCE_ASYNC:
+        if (dwNewFlags & RTL_RUN_ONCE_CHECK_ONLY)
+        {
+            return STATUS_INVALID_PARAMETER_2;
+        }
+
+        if (InterlockedCompareExchange((volatile size_t*)lpInitOnce, New, Current) == Current)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        return STATUS_OBJECT_NAME_COLLISION;
+
+        break;
+    default:
+        return STATUS_UNSUCCESSFUL;
+        break;
     }
 }
 
@@ -1033,6 +1218,39 @@ SetThreadStackGuaranteeXP(ULONG *size)
     return TRUE;
 }
 
+BOOL
+WINAPI
+InitOnceBeginInitializeXP(LPINIT_ONCE lpInitOnce, DWORD dwFlags, PBOOL fPending, LPVOID* lpContext)
+{
+    DWORD Status = RtlRunOnceBeginInitialize(lpInitOnce, dwFlags, lpContext);
+    if (Status >= STATUS_SUCCESS)
+    {
+        *fPending = Status == STATUS_PENDING;
+        return TRUE;
+    }
+    else
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+}
+
+BOOL
+WINAPI
+InitOnceCompleteXP(LPINIT_ONCE lpInitOnce, DWORD dwFlags, LPVOID lpContext)
+{
+    DWORD Status = RtlRunOnceComplete(lpInitOnce, dwFlags, lpContext);
+    if (Status >= 0)
+    {
+        return TRUE;
+    }
+    else
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+}
+
 VOID WINAPI stub() { RaiseStatus(STATUS_ACCESS_VIOLATION); }
 
 BOOL WINAPI DllMain(
@@ -1048,6 +1266,7 @@ BOOL WINAPI DllMain(
             NtOpenKeyedEvent = (NTOPENKEYEDEVENT)GetProcAddress(ntdll, "NtOpenKeyedEvent");
             NtReleaseKeyedEvent = (NTRELEASEKEYEDEVENT)GetProcAddress(ntdll, "NtReleaseKeyedEvent");
             NtWaitForKeyedEvent = (NTWAITFORKEYEDEVENT)GetProcAddress(ntdll, "NtWaitForKeyedEvent");
+            RtlNtStatusToDosError = (ULONG (NTAPI*)(IN NTSTATUS status))GetProcAddress(ntdll, "RtlNtStatusToDosError");
         }
         break;
     case DLL_PROCESS_DETACH:
