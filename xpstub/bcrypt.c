@@ -29,7 +29,7 @@ static NTSTATUS GLE_NTStatus(BOOL result)
     }
 }
 
-NTSTATUS BCryptGenRandomXP(
+NTSTATUS WINAPI BCryptGenRandomXP(
     BCRYPT_ALG_HANDLE hAlgorithm,
     PUCHAR            pbBuffer,
     ULONG             cbBuffer,
@@ -39,7 +39,7 @@ NTSTATUS BCryptGenRandomXP(
     return GLE_NTStatus(CryptGenRandom((HCRYPTPROV)hAlgorithm, (DWORD)cbBuffer, (char *)pbBuffer));
 }
 
-NTSTATUS BCryptOpenAlgorithmProviderXP(
+NTSTATUS WINAPI BCryptOpenAlgorithmProviderXP(
     BCRYPT_ALG_HANDLE *phAlgorithm,
     LPCWSTR           pszAlgId,
     LPCWSTR           pszImplementation,
@@ -49,7 +49,7 @@ NTSTATUS BCryptOpenAlgorithmProviderXP(
     return GLE_NTStatus(CryptAcquireContextW((HCRYPTPROV *)phAlgorithm, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT|CRYPT_SILENT));
 }
 
-NTSTATUS BCryptCloseAlgorithmProviderXP(
+NTSTATUS WINAPI BCryptCloseAlgorithmProviderXP(
     BCRYPT_ALG_HANDLE hAlgorithm,
     ULONG             dwFlags
 )
