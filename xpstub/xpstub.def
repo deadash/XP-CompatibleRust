@@ -9,6 +9,10 @@ EXPORTS
     AcquireSRWLockExclusive = AcquireSRWLockExclusiveXP
     InitOnceBeginInitialize = InitOnceBeginInitializeXP
     InitOnceComplete = InitOnceCompleteXP
+    GetQueuedCompletionStatusEx = GetQueuedCompletionStatusExXP
+    SetFileCompletionNotificationModes = SetFileCompletionNotificationModesXP
+    GetFinalPathNameByHandleW = GetFinalPathNameByHandleWXP
+    NtCancelIoFileEx = NTDLL.NtCancelIoFile
 
     ; forward to kernel32.
     ActivateActCtx = KERNEL32.ActivateActCtx

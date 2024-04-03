@@ -8,9 +8,21 @@ typedef PRTL_RUN_ONCE LPINIT_ONCE;
 #define STATUS_INVALID_PARAMETER_3 0xC00000F1
 #define STATUS_INVALID_OWNER 0xC000005A
 #define STATUS_OBJECT_NAME_COLLISION 0xC0000035
+#define STATUS_BUFFER_OVERFLOW 0x80000005
 
 // TODO:
 // from: https://github.com/Chuyu-Team/YY-Thunks/blob/master/ThunksList.md
+
+typedef struct _IO_STATUS_BLOCK
+{
+	union
+	{
+		NTSTATUS Status;
+		PVOID Pointer;
+	} DUMMYUNIONNAME;
+
+	ULONG_PTR Information;
+} IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
 
 // NT FUNCTION
 // from: http://undocumented.ntinternals.net/index.html
@@ -45,10 +57,113 @@ typedef NTSTATUS (WINAPI* NTWAITFORKEYEDEVENT)(
     IN BOOLEAN  Alertable,
     IN PLARGE_INTEGER   Timeout OPTIONAL
 );
+typedef enum _OBJECT_INFORMATION_CLASS
+{
+    ObjectBasicInformation,
+    ObjectNameInformation,
+    ObjectTypeInformation,
+    ObjectAllInformation,
+    ObjectDataInformation
+}OBJECT_INFORMATION_CLASS, *POBJECT_INFORMATION_CLASS;
+
+typedef enum _FILE_INFORMATION_CLASS
+{
+	FileDirectoryInformation = 1,
+	FileFullDirectoryInformation,   // 2
+	FileBothDirectoryInformation,   // 3
+	FileBasicInformation,           // 4
+	FileStandardInformation,        // 5
+	FileInternalInformation,        // 6
+	FileEaInformation,              // 7
+	FileAccessInformation,          // 8
+	FileNameInformation,            // 9
+	FileRenameInformation,          // 10
+	FileLinkInformation,            // 11
+	FileNamesInformation,           // 12
+	FileDispositionInformation,     // 13
+	FilePositionInformation,        // 14
+	FileFullEaInformation,          // 15
+	FileModeInformation,            // 16
+	FileAlignmentInformation,       // 17
+	FileAllInformation,             // 18
+	FileAllocationInformation,      // 19
+	FileEndOfFileInformation,       // 20
+	FileAlternateNameInformation,   // 21
+	FileStreamInformation,          // 22
+	FilePipeInformation,            // 23
+	FilePipeLocalInformation,       // 24
+	FilePipeRemoteInformation,      // 25
+	FileMailslotQueryInformation,   // 26
+	FileMailslotSetInformation,     // 27
+	FileCompressionInformation,     // 28
+	FileObjectIdInformation,        // 29
+	FileCompletionInformation,      // 30
+	FileMoveClusterInformation,     // 31
+	FileQuotaInformation,           // 32
+	FileReparsePointInformation,    // 33
+	FileNetworkOpenInformation,     // 34
+	FileAttributeTagInformation,    // 35
+	FileTrackingInformation,        // 36
+	FileIdBothDirectoryInformation, // 37
+	FileIdFullDirectoryInformation, // 38
+	FileValidDataLengthInformation, // 39
+	FileShortNameInformation,       // 40
+	FileIoCompletionNotificationInformation, // 41
+	FileIoStatusBlockRangeInformation,       // 42
+	FileIoPriorityHintInformation,           // 43
+	FileSfioReserveInformation,              // 44
+	FileSfioVolumeInformation,               // 45
+	FileHardLinkInformation,                 // 46
+	FileProcessIdsUsingFileInformation,      // 47
+	FileNormalizedNameInformation,           // 48
+	FileNetworkPhysicalNameInformation,      // 49
+	FileIdGlobalTxDirectoryInformation,      // 50
+	FileIsRemoteDeviceInformation,           // 51
+	FileUnusedInformation,                   // 52
+	FileNumaNodeInformation,                 // 53
+	FileStandardLinkInformation,             // 54
+	FileRemoteProtocolInformation,           // 55
+
+	//
+	//  These are special versions of these operations (defined earlier)
+	//  which can be used by kernel mode drivers only to bypass security
+	//  access checks for Rename and HardLink operations.  These operations
+	//  are only recognized by the IOManager, a file system should never
+	//  receive these.
+	//
+	FileRenameInformationBypassAccessCheck,  // 56
+	FileLinkInformationBypassAccessCheck,    // 57
+	FileVolumeNameInformation,               // 58
+	FileIdInformation,                       // 59
+	FileIdExtdDirectoryInformation,          // 60
+	FileReplaceCompletionInformation,        // 61
+	FileHardLinkFullIdInformation,           // 62
+	FileIdExtdBothDirectoryInformation,      // 63
+	FileMaximumInformation
+
+} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
+
+
+typedef NTSTATUS (NTAPI *pNtQueryObject)(
+    HANDLE Handle,
+    OBJECT_INFORMATION_CLASS ObjectInformationClass,
+    PVOID ObjectInformation,
+    ULONG ObjectInformationLength,
+    PULONG ReturnLength
+);
+typedef NTSTATUS (NTAPI *pNtQueryInformationFile)(
+    HANDLE FileHandle, 
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID FileInformation,
+    ULONG Length,
+    FILE_INFORMATION_CLASS FileInformationClass
+);
 NTOPENKEYEDEVENT NtOpenKeyedEvent;
 NTRELEASEKEYEDEVENT NtReleaseKeyedEvent;
 NTWAITFORKEYEDEVENT NtWaitForKeyedEvent;
 ULONG (NTAPI*RtlNtStatusToDosError)(IN NTSTATUS status);
+pNtQueryObject NtQueryObject;
+pNtQueryInformationFile NtQueryInformationFile;
 
 #define STATUS_RESOURCE_NOT_OWNED 0xC0000264
 
@@ -101,6 +216,17 @@ struct PROCESSOR_NUMBER_
     BYTE    Number;
     BYTE    Reserved;
 };
+
+
+typedef struct _OBJECT_NAME_INFORMATION
+{
+    UNICODE_STRING Name;
+} OBJECT_NAME_INFORMATION, *POBJECT_NAME_INFORMATION;
+
+typedef struct _FILE_NAME_INFORMATION {
+	ULONG FileNameLength;
+	WCHAR FileName[1];
+} FILE_NAME_INFORMATION, *PFILE_NAME_INFORMATION;
 
 struct GDI_TEB_BATCH_
 {
@@ -1251,6 +1377,479 @@ InitOnceCompleteXP(LPINIT_ONCE lpInitOnce, DWORD dwFlags, LPVOID lpContext)
     }
 }
 
+static BOOL __fastcall BasepGetVolumeGUIDFromNTName(const UNICODE_STRING* NtName, wchar_t szVolumeGUID[MAX_PATH])
+{
+#define __szVolumeMountPointPrefix__ L"\\\\?\\GLOBALROOT"
+
+    //一个设备名称 512 长度够多了吧？
+    wchar_t szVolumeMountPoint[512];
+    
+    //检查缓冲区是否充足
+    auto cbBufferNeed = sizeof(__szVolumeMountPointPrefix__) + NtName->Length;
+
+    if (cbBufferNeed > sizeof(szVolumeMountPoint))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    
+    memcpy(szVolumeMountPoint, __szVolumeMountPointPrefix__, sizeof(__szVolumeMountPointPrefix__) - sizeof(__szVolumeMountPointPrefix__[0]));
+    memcpy((char*)szVolumeMountPoint + sizeof(__szVolumeMountPointPrefix__) - sizeof(__szVolumeMountPointPrefix__[0]), NtName->Buffer, NtName->Length);
+
+    szVolumeMountPoint[cbBufferNeed / 2 - 1] = L'\0';
+
+    return GetVolumeNameForVolumeMountPointW(szVolumeMountPoint, szVolumeGUID, MAX_PATH);
+
+#undef __szVolumeMountPointPrefix__
+}
+
+static BOOL __fastcall BasepGetVolumeDosLetterNameFromNTName(const UNICODE_STRING* NtName, wchar_t szVolumeDosLetter[MAX_PATH])
+{
+    wchar_t szVolumeName[MAX_PATH];
+
+    if (!BasepGetVolumeGUIDFromNTName(NtName, szVolumeName))
+    {
+        return FALSE;
+    }
+
+    DWORD cchVolumePathName = 0;
+
+    if (!GetVolumePathNamesForVolumeNameW(szVolumeName, szVolumeDosLetter + 4, MAX_PATH - 4, &cchVolumePathName))
+    {
+        return FALSE;
+    }
+
+    szVolumeDosLetter[0] = L'\\';
+    szVolumeDosLetter[1] = L'\\';
+    szVolumeDosLetter[2] = L'?';
+    szVolumeDosLetter[3] = L'\\';
+
+    return TRUE;
+}
+
+BOOL
+WINAPI
+GetQueuedCompletionStatusExXP(HANDLE CompletionPort, LPOVERLAPPED_ENTRY lpCompletionPortEntries, ULONG ulCount, PULONG ulNumEntriesRemoved, DWORD dwMilliseconds, BOOL fAlertable)
+{
+    if (ulCount == 0 || lpCompletionPortEntries == 0 || ulNumEntriesRemoved == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    *ulNumEntriesRemoved = 0;
+
+    OVERLAPPED_ENTRY _Entry = lpCompletionPortEntries[0];
+    
+    if (fAlertable)
+    {
+        // 使用 WaitForSingleObjectEx 进行等待触发 APC
+        DWORD _uStartTick = GetTickCount();
+        for (;;)
+        {
+            const DWORD _uResult = WaitForSingleObjectEx(CompletionPort, dwMilliseconds, TRUE);
+            if (_uResult == WAIT_OBJECT_0)
+            {
+                // 完成端口有数据了
+                DWORD _bRet = GetQueuedCompletionStatus(CompletionPort, &_Entry.dwNumberOfBytesTransferred, &_Entry.lpCompletionKey, &_Entry.lpOverlapped, 0);
+                if (_bRet)
+                {
+                    *ulNumEntriesRemoved = 1;
+                    break;
+                }
+
+                if (GetLastError() != WAIT_TIMEOUT)
+                {
+                    return FALSE;
+                }
+
+                // 无限等待时无脑继续等即可。
+                if (dwMilliseconds == INFINITE)
+                {
+                    continue;
+                }
+
+                // 计算剩余等待时间，如果剩余等待时间归零则返回
+                const DWORD _uTickSpan = GetTickCount() - _uStartTick;
+                if (_uTickSpan >= dwMilliseconds)
+                {
+                    SetLastError(WAIT_TIMEOUT);
+                    return FALSE;
+                }
+                dwMilliseconds -= _uTickSpan;
+                _uStartTick += _uTickSpan;
+                continue;
+            }
+            else if (_uResult == WAIT_IO_COMPLETION || _uResult == WAIT_TIMEOUT)
+            {
+                // 很奇怪，微软原版遇到 APC唤醒直接会设置 LastError WAIT_IO_COMPLETION
+                // 遇到超时，LastError WAIT_TIMEOUT（注意不是预期的 ERROR_TIMEOUT）不知道是故意还是有意。
+                SetLastError(_uResult);
+                return FALSE;
+            }
+            else if (_uResult == WAIT_ABANDONED)
+            {
+                SetLastError(ERROR_ABANDONED_WAIT_0);
+                return FALSE;
+            }
+            else if (_uResult == WAIT_FAILED)
+            {
+                // LastError
+                return FALSE;
+            }
+            else
+            {
+                // LastError ???
+                return FALSE;
+            }
+        }
+
+        return TRUE;
+    }
+    else
+    {
+        DWORD _bRet = GetQueuedCompletionStatus(CompletionPort, &_Entry.dwNumberOfBytesTransferred, &_Entry.lpCompletionKey, &_Entry.lpOverlapped, dwMilliseconds);
+        if (_bRet)
+        {
+            *ulNumEntriesRemoved = 1;
+        }
+        return _bRet;
+    }
+}
+
+BOOL
+WINAPI
+SetFileCompletionNotificationModesXP(HANDLE FileHandle, UCHAR Flags)
+{
+    // 初步看起来没有什么的，只是会降低完成端口的效率。
+    // 至少需要 Vista才支持 FileIoCompletionNotificationInformation
+    // 只能假定先返回成功。
+    return TRUE;
+}
+
+DWORD
+WINAPI
+GetFinalPathNameByHandleWXP(
+    HANDLE hFile,
+    LPWSTR lpszFilePath,
+    DWORD cchFilePath,
+    DWORD dwFlags
+    )
+{
+    //参数检查
+    if (INVALID_HANDLE_VALUE == hFile)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+
+    switch (dwFlags & (VOLUME_NAME_DOS | VOLUME_NAME_GUID | VOLUME_NAME_NONE | VOLUME_NAME_NT))
+    {
+    case VOLUME_NAME_DOS:
+        break;
+    case VOLUME_NAME_GUID:
+        break;
+    case VOLUME_NAME_NT:
+        break;
+    case VOLUME_NAME_NONE:
+        break;
+    default:
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+        break;
+    }
+
+    UNICODE_STRING VolumeNtName = { 0 };
+
+    wchar_t szVolumeRoot[MAX_PATH];
+    szVolumeRoot[0] = L'\0';
+
+    wchar_t* szLongPathNameBuffer = NULL;
+
+    //目标所需的分区名称，不包含最后的 '\\'
+    UNICODE_STRING TargetVolumeName = { 0 };
+    //目标所需的文件名，开始包含 '\\'
+    UNICODE_STRING TargetFileName = { 0 };
+
+    HANDLE ProcessHeap = ((struct TEB_*)NtTeb())->ProcessEnvironmentBlock->ProcessHeap;
+    LSTATUS lStatus = ERROR_SUCCESS;
+    DWORD   cchReturn = 0;
+
+    OBJECT_NAME_INFORMATION* pObjectName = NULL;
+    ULONG cbObjectName = 528;
+
+    FILE_NAME_INFORMATION* pFileNameInfo = NULL;
+    ULONG cbFileNameInfo = 528;
+
+    for (;;)
+    {
+        if (pObjectName)
+        {
+            OBJECT_NAME_INFORMATION* pNewBuffer = (OBJECT_NAME_INFORMATION*)(void *)HeapReAlloc(ProcessHeap, 0, pObjectName, cbObjectName);
+
+            if (!pNewBuffer)
+            {
+                lStatus = ERROR_NOT_ENOUGH_MEMORY;
+                goto __Exit;
+            }
+
+            pObjectName = pNewBuffer;
+        }
+        else
+        {
+            pObjectName = (OBJECT_NAME_INFORMATION*)HeapAlloc(ProcessHeap, 0, cbObjectName);
+
+            if (!pObjectName)
+            {
+                //内存不足？
+                lStatus = ERROR_NOT_ENOUGH_MEMORY;
+                goto __Exit;
+            }
+        }
+
+        NTSTATUS Status = NtQueryObject(hFile, ObjectNameInformation, pObjectName, cbObjectName, &cbObjectName);
+
+        if (STATUS_BUFFER_OVERFLOW == Status)
+        {
+            continue;
+        }
+        else if (Status < 0)
+        {
+            lStatus = NtStatusToDosError(Status);
+
+            goto __Exit;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    for (;;)
+    {
+        if (pFileNameInfo)
+        {
+            FILE_NAME_INFORMATION* pNewBuffer = (FILE_NAME_INFORMATION*)HeapReAlloc(ProcessHeap, 0, pFileNameInfo, cbFileNameInfo);
+            if (!pNewBuffer)
+            {
+                lStatus = ERROR_NOT_ENOUGH_MEMORY;
+                goto __Exit;
+            }
+
+            pFileNameInfo = pNewBuffer;
+        }
+        else
+        {
+            pFileNameInfo = (FILE_NAME_INFORMATION*)HeapAlloc(ProcessHeap, 0, cbFileNameInfo);
+
+            if (!pFileNameInfo)
+            {
+                //内存不足？
+                lStatus = ERROR_NOT_ENOUGH_MEMORY;
+                goto __Exit;
+            }
+        }
+
+        IO_STATUS_BLOCK IoStatusBlock;
+
+        NTSTATUS Status = NtQueryInformationFile(hFile, &IoStatusBlock, pFileNameInfo, cbFileNameInfo, FileNameInformation);
+
+        if (STATUS_BUFFER_OVERFLOW == Status)
+        {
+            cbFileNameInfo = pFileNameInfo->FileNameLength + sizeof(FILE_NAME_INFORMATION);
+            continue;
+        }
+        else if (Status < 0)
+        {
+            lStatus = NtStatusToDosError(Status);
+
+            goto __Exit;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (pFileNameInfo->FileName[0] != '\\')
+    {
+        lStatus = ERROR_ACCESS_DENIED;
+        goto __Exit;
+    }
+
+
+
+    if (pFileNameInfo->FileNameLength >= pObjectName->Name.Length)
+    {
+        lStatus = ERROR_BAD_PATHNAME;
+        goto __Exit;
+    }
+
+    VolumeNtName.Buffer = pObjectName->Name.Buffer;
+    VolumeNtName.Length = VolumeNtName.MaximumLength = pObjectName->Name.Length - pFileNameInfo->FileNameLength + sizeof(wchar_t);
+
+
+    if (VOLUME_NAME_NT & dwFlags)
+    {
+        //返回NT路径
+        TargetVolumeName.Buffer = VolumeNtName.Buffer;
+        TargetVolumeName.Length = TargetVolumeName.MaximumLength = VolumeNtName.Length - sizeof(wchar_t);
+    }
+    else if (VOLUME_NAME_NONE & dwFlags)
+    {
+        //仅返回文件名
+    }
+    else
+    {
+        if (VOLUME_NAME_GUID & dwFlags)
+        {
+            //返回分区GUID名称
+            if (!BasepGetVolumeGUIDFromNTName(&VolumeNtName, szVolumeRoot))
+            {
+                lStatus = GetLastError();
+                goto __Exit;
+            }
+        }
+        else
+        {
+            //返回Dos路径
+            if (!BasepGetVolumeDosLetterNameFromNTName(&VolumeNtName, szVolumeRoot))
+            {
+                lStatus = GetLastError();
+                goto __Exit;
+            }
+        }
+
+        TargetVolumeName.Buffer = szVolumeRoot;
+        TargetVolumeName.Length = TargetVolumeName.MaximumLength = (wcslen(szVolumeRoot) - 1) * sizeof(szVolumeRoot[0]);
+    }
+
+    //将路径进行规范化
+    if ((FILE_NAME_OPENED & dwFlags) == 0)
+    {
+        //由于 Windows XP不支持 FileNormalizedNameInformation，所以我们直接调用 GetLongPathNameW 获取完整路径。
+
+        DWORD cbszVolumeRoot = TargetVolumeName.Length;
+
+        if (szVolumeRoot[0] == L'\0')
+        {
+            //转换分区信息
+
+            if (!BasepGetVolumeDosLetterNameFromNTName(&VolumeNtName, szVolumeRoot))
+            {
+                lStatus = GetLastError();
+
+                if(lStatus == ERROR_NOT_ENOUGH_MEMORY)
+                    goto __Exit;
+
+                if (!BasepGetVolumeGUIDFromNTName(&VolumeNtName, szVolumeRoot))
+                {
+                    lStatus = GetLastError();
+                    goto __Exit;
+                }
+            }
+
+            cbszVolumeRoot = (wcslen(szVolumeRoot) - 1) * sizeof(szVolumeRoot[0]);
+        }
+
+
+
+        DWORD cbLongPathNameBufferSize = cbszVolumeRoot + pFileNameInfo->FileNameLength + 1024;
+
+        szLongPathNameBuffer = (wchar_t*)HeapAlloc(ProcessHeap, 0, cbLongPathNameBufferSize);
+        if (!szLongPathNameBuffer)
+        {
+            lStatus = ERROR_NOT_ENOUGH_MEMORY;
+            goto __Exit;
+        }
+
+        DWORD cchLongPathNameBufferSize = cbLongPathNameBufferSize / sizeof(szLongPathNameBuffer[0]);
+
+        memcpy(szLongPathNameBuffer, szVolumeRoot, cbszVolumeRoot);
+        memcpy((char*)szLongPathNameBuffer + cbszVolumeRoot, pFileNameInfo->FileName, pFileNameInfo->FileNameLength);
+        szLongPathNameBuffer[(cbszVolumeRoot + pFileNameInfo->FileNameLength) / sizeof(wchar_t)] = L'\0';
+
+        for (;;)
+        {
+            DWORD result = GetLongPathNameW(szLongPathNameBuffer, szLongPathNameBuffer, cchLongPathNameBufferSize);
+
+            if (result == 0)
+            {
+                //失败
+                lStatus = GetLastError();
+                goto __Exit;
+            }
+            else if (result >= cchLongPathNameBufferSize)
+            {
+                cchLongPathNameBufferSize = result + 1;
+
+                wchar_t* pNewLongPathName = (wchar_t*)HeapReAlloc(ProcessHeap, 0, szLongPathNameBuffer, cchLongPathNameBufferSize * sizeof(wchar_t));
+                if (!pNewLongPathName)
+                {
+                    lStatus = ERROR_NOT_ENOUGH_MEMORY;
+                    goto __Exit;
+                }
+
+                szLongPathNameBuffer = pNewLongPathName;
+        
+            }
+            else
+            {
+                //转换成功
+                TargetFileName.Buffer = (wchar_t*)((char*)szLongPathNameBuffer + cbszVolumeRoot);
+                TargetFileName.Length = TargetFileName.MaximumLength = result * sizeof(wchar_t) - cbszVolumeRoot;
+                break;
+            }
+        }
+    }
+    else
+    {
+        //直接返回原始路径
+        TargetFileName.Buffer = pFileNameInfo->FileName;
+        TargetFileName.Length = TargetFileName.MaximumLength = pFileNameInfo->FileNameLength;
+    }
+
+
+    //返回结果，根目录 + 文件名 的长度
+    cchReturn = (TargetVolumeName.Length + TargetFileName.Length) / sizeof(wchar_t);
+
+    if (cchFilePath <= cchReturn)
+    {
+        //长度不足……
+
+        cchReturn += 1;
+    }
+    else
+    {
+        //复制根目录
+        memcpy(lpszFilePath, TargetVolumeName.Buffer, TargetVolumeName.Length);
+        //复制文件名
+        memcpy((char*)lpszFilePath + TargetVolumeName.Length, TargetFileName.Buffer, TargetFileName.Length);
+        //保证字符串 '\0' 截断
+        lpszFilePath[cchReturn] = L'\0';
+    }
+
+__Exit:
+    if (pFileNameInfo)
+        HeapFree(ProcessHeap, 0, pFileNameInfo);
+    if (pObjectName)
+        HeapFree(ProcessHeap, 0, pObjectName);
+    if (szLongPathNameBuffer)
+        HeapFree(ProcessHeap, 0, szLongPathNameBuffer);
+
+    if (lStatus != ERROR_SUCCESS)
+    {
+        SetLastError(lStatus);
+        return 0;
+    }
+    else
+    {
+        return cchReturn;
+    }
+}
+
+
 VOID WINAPI stub() { RaiseStatus(STATUS_ACCESS_VIOLATION); }
 
 BOOL WINAPI DllMain(
@@ -1267,6 +1866,8 @@ BOOL WINAPI DllMain(
             NtReleaseKeyedEvent = (NTRELEASEKEYEDEVENT)GetProcAddress(ntdll, "NtReleaseKeyedEvent");
             NtWaitForKeyedEvent = (NTWAITFORKEYEDEVENT)GetProcAddress(ntdll, "NtWaitForKeyedEvent");
             RtlNtStatusToDosError = (ULONG (NTAPI*)(IN NTSTATUS status))GetProcAddress(ntdll, "RtlNtStatusToDosError");
+            NtQueryObject = (pNtQueryObject)GetProcAddress(ntdll, "NtQueryObject");
+            NtQueryInformationFile = (pNtQueryInformationFile)GetProcAddress(ntdll, "NtQueryInformationFile");
         }
         break;
     case DLL_PROCESS_DETACH:

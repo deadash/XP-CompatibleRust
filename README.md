@@ -23,8 +23,8 @@ To compile the project, you need to execute two commands:
 
 1. Build the native components with the batch script:
 
-   ```bash
-   make.bat
+   ```powershell
+   .\Build.ps1 build
    ```
 
 2. Then build the Rust components:
